@@ -1,0 +1,10 @@
+Django>=5.2
+djangorestframework
+drf-yasg
+pandas
+sqlalchemy
+pymysql
+requests
+celery>=5.0
+redis
+mysqlclient  # if you switch to MySQL

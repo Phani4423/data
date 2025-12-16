@@ -1,9 +1,86 @@
+from rest_framework.permissions import IsAuthenticated
+
+# Utility to get allowed features for a role
+def get_allowed_features(user_role):
+    features = []
+    # File features
+    if abac_check(user_role, 'ingest', {'resource_type': 'file'}):
+        features.append('File Ingest')
+    if abac_check(user_role, 'transform', {'resource_type': 'file'}):
+        features.append('File Transform')
+    if abac_check(user_role, 'load', {'resource_type': 'file'}):
+        features.append('File Load')
+    if abac_check(user_role, 'read', {'resource_type': 'file'}):
+        features.append('File Read')
+    # API features
+    if abac_check(user_role, 'ingest', {'resource_type': 'api'}):
+        features.append('API Ingest')
+    if abac_check(user_role, 'validate', {'resource_type': 'api'}):
+        features.append('API Validate')
+    return features
+
+# /me/ endpoint
+from drf_yasg.utils import swagger_auto_schema
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+class MeAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(operation_description="Get current user info and allowed features.")
+    def get(self, request):
+        user = request.user
+        role = getattr(user, 'role', None)
+        features = get_allowed_features(role)
+        return Response({
+            'username': user.username,
+            'role': role,
+            'features': features
+        })
+from django.contrib.auth import authenticate
+from rest_framework.authtoken.models import Token
+from rest_framework.permissions import AllowAny
+# ABAC import
+from .abac import abac_check
+from .serializers_auth import RegisterSerializer, LoginSerializer
+# ========== User Registration =============
+
+from drf_yasg.utils import swagger_auto_schema
+from rest_framework.views import APIView
+
+class RegisterAPIView(APIView):
+    permission_classes = [AllowAny]
+    def post(self, request):
+        serializer = RegisterSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.save()
+            token, _ = Token.objects.get_or_create(user=user)
+            return Response({"token": token.key, "username": user.username, "role": user.role})
+        return Response(serializer.errors, status=400)
+
+# ========== User Login =============
+class LoginAPIView(APIView):
+    permission_classes = [AllowAny]
+    @swagger_auto_schema(request_body=LoginSerializer)
+    def post(self, request):
+        serializer = LoginSerializer(data=request.data)
+        if serializer.is_valid():
+            user = authenticate(username=serializer.validated_data["username"], password=serializer.validated_data["password"])
+            if user:
+                token, _ = Token.objects.get_or_create(user=user)
+                return Response({"token": token.key, "username": user.username, "role": user.role})
+            return Response({"error": "Invalid credentials"}, status=400)
+        return Response(serializer.errors, status=400)
+from celery.result import AsyncResult
+from rest_framework.views import APIView
+
+
 from rest_framework import generics, status
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.renderers import JSONRenderer, BrowsableAPIRenderer
 from rest_framework.response import Response
 
-from .serializers import FileUploadSerializer, CarFetchSerializer
+from .serializers import FileUploadSerializer, RandomUserFetchSerializer
 
 import pandas as pd
 import io
@@ -12,21 +89,30 @@ import requests
 from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 
-
+class TaskStatusAPIView(APIView):
+    def get(self, request, task_id):
+        from data.celery import app  # Import your Celery app
+        result = AsyncResult(task_id, app=app)
+        response = {
+            "task_id": task_id,
+            "status": result.status,
+        }
+        if result.status == "SUCCESS":
+            try:
+                response["result"] = result.get(timeout=1)
+            except Exception as e:
+                response["result"] = str(e)
+        else:
+            response["result"] = None
+        return Response(response)
 # MySQL connection (change if your credentials are different)
-DB_URL = "mysql+pymysql://root:root@localhost:3306/etl_db"
+DB_URL = "mysql+pymysql://root:root@localhost:3306/new_etl_db"
 engine = create_engine(DB_URL, echo=False, future=True)
 
 
 #   EXTRACT (from FILE)
 def load_file_to_dataframe(django_file):
-    """
-    Extract step (FILE SOURCE)
-
-    Try reading the uploaded file as CSV, JSON, XML, Excel (in that order).
-    Returns: (df, detected_type)
-    Raises: ValueError if none work.
-    """
+    
     content = django_file.read()  # bytes
 
     parsers = [
@@ -52,63 +138,12 @@ def load_file_to_dataframe(django_file):
 
 
 #   LOAD (common for all)
-def save_dataframe_to_mysql(df: pd.DataFrame, table_name: str = "car_data"):
-    """
-    Load step (common)
 
-    Save DataFrame to MySQL in tabular form.
-    - Creates table if it doesn't exist.
-    - Appends rows if it does.
-    """
     if df.empty:
         raise ValueError("File contains no data")
 
     df.to_sql(table_name, engine, if_exists="append", index=False)
 
-
-
-#   EXTRACT (from EXTERNAL CARS API)
-
-
-API_KEY = "wauPMBxuKFuh+IbSVCcyVg==IFt4kF99StYj9wp8"
-BASE_URL = "https://api.api-ninjas.com/v1/cars"
-
-
-def extract_car_data(make: str, model: str):
-    """
-    Extract step (API SOURCE)
-
-    Calls external API and fetches car data based on make+model.
-    """
-    url = f"{BASE_URL}?make={make}&model={model}"
-    headers = {"X-Api-Key": API_KEY}
-
-    response = requests.get(url, headers=headers)
-
-    if response.status_code != 200:
-        raise ValueError(f"API Error: {response.text}")
-
-    data = response.json()
-
-    if not data:
-        raise ValueError("No data returned from API")
-
-    return data
-
-
-#   TRANSFORM (API data)
-def transform_car_data(raw_data):
-    """
-    Transform step (API SOURCE)
-
-    Convert JSON list into a DataFrame and add metadata.
-    """
-    df = pd.DataFrame(raw_data)
-
-    # Add ETL metadata
-    df["fetched_at"] = datetime.utcnow()
-
-    return df
 
 
 #   VIEW 1: FILE → ETL → MySQL (OLD CODE)
@@ -121,10 +156,8 @@ class FileUploadAPIView(generics.GenericAPIView):
       - file (required): CSV / JSON / XML / Excel file
 
     Behaviour:
-      - Extracts: reads file and detects type
-      - Transforms: adds 'uploaded_at'
-      - Loads: saves into MySQL in tabular format
-      - Returns JSON with info + preview of data
+      - This endpoint now enqueues a background Celery task to process the file.
+      - Returns a `task_id` which can be used to inspect results with a Celery result backend.
     """
 
     serializer_class = FileUploadSerializer
@@ -132,6 +165,12 @@ class FileUploadAPIView(generics.GenericAPIView):
     renderer_classes = (JSONRenderer, BrowsableAPIRenderer)
 
     def post(self, request, *args, **kwargs):
+        # ABAC: Only allow if user has permission to ingest file
+        user = request.user
+        user_role = getattr(user, 'role', None)
+        if not abac_check(user_role, 'ingest', {"resource_type": "file"}):
+            return Response({"error": "Access denied by ABAC policy."}, status=status.HTTP_403_FORBIDDEN)
+
         #  Validate request (file + optional table_name)
         serializer = self.get_serializer(data=request.data)
         if not serializer.is_valid():
@@ -141,103 +180,46 @@ class FileUploadAPIView(generics.GenericAPIView):
         table_name = serializer.validated_data.get("table_name") or "uploaded_data"
 
         try:
-            # 1️ EXTRACT + small TRANSFORM (from file)
-            df, detected_type = load_file_to_dataframe(django_file)
+            # read bytes and enqueue a Celery task
+            file_bytes = django_file.read()
+            from app.tasks import process_upload_task
 
-            # 2️ LOAD into MySQL
-            save_dataframe_to_mysql(df, table_name)
+            task = process_upload_task.delay(file_bytes, table_name)
+            return Response({"message": "Task queued", "task_id": task.id}, status=status.HTTP_202_ACCEPTED)
 
-            preview_df = df.head(5)
-            preview = {
-                "columns": list(preview_df.columns),
-                "rows": preview_df.to_dict(orient="records"),
-            }
-
-            from django.http import JsonResponse
-
-            return JsonResponse(
-                {
-                    "message": "File uploaded and stored in MySQL successfully",
-                    "source": "file",
-                    "detected_type": detected_type,
-                    "table_name": table_name,
-                    "rows_inserted": len(df),
-                    "preview": preview,
-                },
-                status=status.HTTP_200_OK,
-            )
-
-        except ValueError as ve:
-            return Response({"error": str(ve)}, status=status.HTTP_400_BAD_REQUEST)
-        except SQLAlchemyError as db_err:
-            return Response(
-                {"error": f"MySQL Error: {str(db_err)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 
-class FetchCarDataAPIView(generics.GenericAPIView):
-    """
-    POST /fetch-cars/
 
-    JSON Body:
-    {
-        "make": "Audi",
-        "model": "A4",
-    }
 
-    Behaviour:
-      - Extract: calls external cars API using API key
-      - Transform: JSON → DataFrame + add 'fetched_at'
-      - Load: save into MySQL
-      - Returns JSON with info + preview of data
-    """
 
-    serializer_class = CarFetchSerializer
+class FetchRandomUsersAPIView(generics.GenericAPIView):
+   
+
+    serializer_class = RandomUserFetchSerializer
     renderer_classes = (JSONRenderer, BrowsableAPIRenderer)
 
     def post(self, request, *args, **kwargs):
-        # ✅ Validate input (make, model)
+        # ABAC: Only allow if user has permission to ingest API
+        user = request.user
+        user_role = getattr(user, 'role', None)
+        if not abac_check(user_role, 'ingest', {"resource_type": "api"}):
+            return Response({"error": "Access denied by ABAC policy."}, status=status.HTTP_403_FORBIDDEN)
+
+        #  Validate input (count is optional)
         serializer = self.get_serializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        make = serializer.validated_data["make"]
-        model = serializer.validated_data["model"]
+        count = serializer.validated_data.get("count", 2)
 
         try:
-            # 1️⃣ EXTRACT (from external API)
-            raw_data = extract_car_data(make, model)
+            from app.tasks import fetch_random_users_task
 
-            # 2️⃣ TRANSFORM (JSON → DataFrame)
-            df = transform_car_data(raw_data)
+            task = fetch_random_users_task.delay(count)
+            return Response({"message": "Task queued", "task_id": task.id}, status=status.HTTP_202_ACCEPTED)
 
-            # 3️⃣ LOAD into MySQL
-            save_dataframe_to_mysql(df)
-
-            preview_df = df.head(5)
-
-            return Response(
-                {
-                    "message": "Car data fetched from external API and stored in MySQL successfully",
-                    "source": "external_api",
-                    "api_make": make,
-                    "api_model": model,
-                    "rows_inserted": len(df),
-                    "preview": preview_df.to_dict(orient="records"),
-                },
-                status=status.HTTP_200_OK,
-            )
-
-        except ValueError as ve:
-            return Response({"error": str(ve)}, status=status.HTTP_400_BAD_REQUEST)
-        except SQLAlchemyError as db_err:
-            return Response(
-                {"error": f"MySQL Error: {str(db_err)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

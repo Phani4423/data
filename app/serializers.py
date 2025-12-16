@@ -11,12 +11,11 @@ class FileUploadSerializer(serializers.Serializer):
     table_name = serializers.CharField(required=False, allow_blank=True)
 
 
-class CarFetchSerializer(serializers.Serializer):
+
+
+class RandomUserFetchSerializer(serializers.Serializer):
     """
-    Serializer for external API ETL.
-    - make: car make (e.g., Audi)
-    - model: car model (e.g., A4)
-    - table_name: optional MySQL table name
+    Serializer for random user fetch API ETL.
+    - count: number of random users to fetch (default: 2)
     """
-    make = serializers.CharField()
-    model = serializers.CharField()
+    count = serializers.IntegerField(required=False, default=2, min_value=1, max_value=100)
