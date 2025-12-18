@@ -15,25 +15,38 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
-from django.urls import path, include
-
-from django.contrib import admin
 from django.urls import path, re_path, include
 from rest_framework import permissions
 from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
 
 
-schema_view = get_schema_view(
-    openapi.Info(
-        title="ETL API Documentation",
-        default_version="v1",
-        description="API for File Upload ETL + External Car API ETL",
-        contact=openapi.Contact(email="support@example.com"),
-    ),
-    public=True,
-    permission_classes=(permissions.AllowAny,),
-)
+def get_schema_view_with_permissions():
+    """Get schema view with permission-based generator"""
+    from app.schema import PermissionBasedSchemaGenerator
+
+    return get_schema_view(
+        openapi.Info(
+            title="ETL API Documentation",
+            default_version="v1",
+            description="""
+            <b>Welcome to the ETL API!</b><br><br>
+            <b>For Unauthenticated Users:</b><br>
+            Only login and registration endpoints are visible.<br><br>
+            <b>For Authenticated Users:</b><br>
+            <b>Step 1:</b> You are already logged in! Your available features are shown below.<br>
+            <b>Step 2:</b> Use the endpoints you have permission for based on your ABAC policies.<br><br>
+            <b>Note:</b> Endpoints are filtered based on your permissions. If you don't see an endpoint, you don't have access to it.<br>
+            """,
+            contact=openapi.Contact(email="support@example.com"),
+        ),
+        public=True,
+        permission_classes=(permissions.AllowAny,),
+        generator_class=PermissionBasedSchemaGenerator,
+    )
+
+
+schema_view = get_schema_view_with_permissions()
 
 
 urlpatterns = [
@@ -53,7 +66,3 @@ urlpatterns = [
     path('redoc/', schema_view.with_ui('redoc', cache_timeout=0),
          name='schema-redoc'),
 ]
-
-
-
-

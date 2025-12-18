@@ -156,9 +156,12 @@ SWAGGER_SETTINGS = {
             'type': 'apiKey',
             'in': 'header',
             'name': 'Authorization',
-            'description': 'Token-based authentication. Enter as: Token <your_token> (include the word Token and a space before your token)'
+            'description': 'Token-based authentication. Enter as: Token <your_token>'
         }
-    }
+    },
+    'DEFAULT_SCHEMA_CLASS': 'app.schema.PermissionBasedSchemaGenerator',
+    'USE_SESSION_AUTH': False,
 }
+
 # After this change, run these commands in your terminal (not in this file):
 
